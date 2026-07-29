@@ -51,6 +51,14 @@ const IS_CI = haskey(ENV, "JULIA_PKGTEST") || haskey(ENV, "CI")
         options = ClaudeBox.parse_args(String[])
         @test options["codex"] == false
 
+        # Test kvm parsing
+        options = ClaudeBox.parse_args(String["--kvm"])
+        @test options["kvm"] == true
+
+        # Test kvm default is false
+        options = ClaudeBox.parse_args(String[])
+        @test options["kvm"] == false
+
         # Test profile parsing
         options = ClaudeBox.parse_args(String["--profile", "work"])
         @test options["profile"] == "work"
@@ -118,6 +126,11 @@ const IS_CI = haskey(ENV, "JULIA_PKGTEST") || haskey(ENV, "CI")
         @test state_profile.local_dir == state.local_dir
         @test ClaudeBox.claude_project_history_dir(state_profile.work_dir) == ClaudeBox.claude_project_history_dir(state.work_dir)
         @test ClaudeBox.claude_project_mount_path("/workspace") == "/root/.claude/projects/-workspace"
+
+        # Test KVM passthrough is off by default and can be enabled
+        @test state.kvm == false
+        state_kvm = ClaudeBox.initialize_state(pwd(), String[], false, false, false, false, false, false, nothing, true)
+        @test state_kvm.kvm == true
 
         # Test Codex history is separated by workspace under the selected Codex root.
         @test ClaudeBox.codex_workspace_history_name("/tmp/my-project") == "-tmp-my-project"

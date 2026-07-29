@@ -77,6 +77,7 @@ mutable struct AppState
     use_opencode::Bool
     use_codex::Bool
     preserve_path::Bool
+    kvm::Bool
 end
 
 """
@@ -134,6 +135,12 @@ function _main(args::Vector{String})::Cint
         return 0
     end
 
+    # Verify KVM availability early so we can fail with a clear message
+    if options["kvm"] && !ispath("/dev/kvm")
+        cprintln(RED, "Error: --kvm requested, but host has no /dev/kvm (KVM module not loaded, or running in a VM without nested virtualization)")
+        return 1
+    end
+
     # Show banner
     print_banner()
 
@@ -147,7 +154,7 @@ function _main(args::Vector{String})::Cint
     end
 
     # Initialize application state
-    state = initialize_state(options["work_dir"], options["claude_args"], options["bash"], options["dangerous_github_auth"], options["gemini"], options["opencode"], options["codex"], options["preserve"], options["profile"])
+    state = initialize_state(options["work_dir"], options["claude_args"], options["bash"], options["dangerous_github_auth"], options["gemini"], options["opencode"], options["codex"], options["preserve"], options["profile"], options["kvm"])
 
     # Handle GitHub authentication (enabled by default)
     if !options["no_github_auth"]
@@ -266,6 +273,7 @@ function parse_args(args::Vector{String})
         "opencode" => false,
         "codex" => false,
         "preserve" => false,
+        "kvm" => false,
         "profile" => nothing,
         "claude_args" => String[]
     )
@@ -297,6 +305,8 @@ function parse_args(args::Vector{String})
             options["codex"] = true
         elseif arg == "--preserve"
             options["preserve"] = true
+        elseif arg == "--kvm"
+            options["kvm"] = true
         elseif arg == "--profile"
             if i < length(args)
                 i += 1
@@ -370,6 +380,9 @@ function print_help()
         --no-github-auth    Skip GitHub authentication (enabled by default)
         --dangerous-github-auth  Use GitHub auth with broader permissions (repo creation, etc)
         --bash              Keep bash shell open after claude exits
+        --kvm               Pass /dev/kvm through to the sandbox (enables
+                            hardware virtualization: firecracker, QEMU-KVM,
+                            rr inside guests)
         --gemini            Use gemini instead of claude
         --opencode          Use opencode instead of claude
         --codex             Use OpenAI codex instead of claude
@@ -409,7 +422,7 @@ function print_help()
     """)
 end
 
-function initialize_state(work_dir::String, claude_args::Vector{String}=String[], keep_bash::Bool=false, dangerous_github_auth::Bool=false, use_gemini::Bool=false, use_opencode::Bool=false, use_codex::Bool=false, preserve_path::Bool=false, claude_profile::Union{String, Nothing}=nothing)::AppState
+function initialize_state(work_dir::String, claude_args::Vector{String}=String[], keep_bash::Bool=false, dangerous_github_auth::Bool=false, use_gemini::Bool=false, use_opencode::Bool=false, use_codex::Bool=false, preserve_path::Bool=false, claude_profile::Union{String, Nothing}=nothing, kvm::Bool=false)::AppState
     if !isnothing(claude_profile)
         claude_profile = validate_profile_name(claude_profile)
     end
@@ -464,7 +477,7 @@ function initialize_state(work_dir::String, claude_args::Vector{String}=String[]
     # Load existing GitHub tokens if available
     tokens = load_github_tokens(claude_prefix, dangerous_github_auth)
 
-    return AppState(tools_prefix, claude_prefix, julia_depot_prefix, nodejs_dir, npm_dir, gh_cli_dir, build_tools_dir, toolchain_dir, juliaup_dir, julia_dir, claude_profile, claude_home_dir, claude_json_path, gemini_home_dir, opencode_home_dir, codex_home_dir, local_dir, work_dir, claude_installed, gemini_installed, opencode_installed, codex_installed, tokens.access_token, tokens.refresh_token, tokens.expires_at, claude_args, keep_bash, nothing, dangerous_github_auth, use_gemini, use_opencode, use_codex, preserve_path)
+    return AppState(tools_prefix, claude_prefix, julia_depot_prefix, nodejs_dir, npm_dir, gh_cli_dir, build_tools_dir, toolchain_dir, juliaup_dir, julia_dir, claude_profile, claude_home_dir, claude_json_path, gemini_home_dir, opencode_home_dir, codex_home_dir, local_dir, work_dir, claude_installed, gemini_installed, opencode_installed, codex_installed, tokens.access_token, tokens.refresh_token, tokens.expires_at, claude_args, keep_bash, nothing, dangerous_github_auth, use_gemini, use_opencode, use_codex, preserve_path, kvm)
 end
 
 """
@@ -1262,6 +1275,16 @@ function create_sandbox_config(state::AppState; stdin=Base.devnull, stdout=Base.
         "/root/.local" => Sandbox.MountInfo(state.local_dir, Sandbox.MountType.ReadWrite)
     )
 
+    # Pass /dev/kvm through to the sandbox if requested. The userns executor
+    # bind-mounts the host device node, so guests get direct KVM access
+    # (firecracker, QEMU-KVM, rr recording inside guests, etc.).
+    if state.kvm
+        if !ispath("/dev/kvm")
+            error("--kvm requested, but host has no /dev/kvm (KVM module not loaded, or running in a VM without nested virtualization)")
+        end
+        mounts["/dev/kvm"] = Sandbox.MountInfo("/dev/kvm", Sandbox.MountType.ReadWrite)
+    end
+
     # Add claude_sandbox repository if available
     if !isnothing(state.claude_sandbox_dir) && isdir(state.claude_sandbox_dir)
         mounts["/root/.claude_sandbox"] = Sandbox.MountInfo(state.claude_sandbox_dir, Sandbox.MountType.ReadWrite)
@@ -1416,6 +1439,9 @@ function run_sandbox(state::AppState)
     println()
 
     println("📁 Workspace: $(BOLD)$workspace_mount$(RESET) → $(state.work_dir)")
+    if state.kvm
+        println("🖥️  KVM: $(BOLD)/dev/kvm$(RESET) passed through (hardware virtualization enabled)")
+    end
     if !isnothing(state.claude_profile)
         println("👤 Claude profile: $(BOLD)$(state.claude_profile)$(RESET)")
     end
@@ -1487,6 +1513,18 @@ Please check `/root/.claude_sandbox/CLAUDE_SANDBOX.md` for any custom configurat
 """
         end
 
+        kvm_section = ""
+        if state.kvm
+            kvm_section = """
+
+## KVM Passthrough
+
+`/dev/kvm` is passed through from the host, so hardware virtualization is
+available inside the sandbox (firecracker microVMs, QEMU with `-accel kvm`,
+rr recording inside guests via the virtual PMU).
+"""
+        end
+
         github_token_section = ""
         if isfile(github_token_file(state))
             github_token_section = """
@@ -1535,7 +1573,7 @@ elseif state.dangerous_github_auth
     "- GitHub authenticated with **DANGEROUS** permissions (repository creation, etc.)\n- ⚠️  Use caution with these elevated permissions!"
 else
     "- GitHub authenticated with standard permissions\n- You can use git and gh commands\n- Repository creation and most admin actions are disabled\n- For broader permissions (repo creation, etc.), ask the user to restart with `claudebox --dangerous-github-auth`"
-end)$claude_sandbox_section$github_token_section
+end)$claude_sandbox_section$github_token_section$kvm_section
 
 ## Tips
 

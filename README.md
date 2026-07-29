@@ -109,6 +109,19 @@ By default, GitHub authentication uses minimal permissions. For broader access i
 
 ⚠️ **Warning**: This mode grants elevated permissions. Use with caution.
 
+### KVM Passthrough
+
+Pass the host's `/dev/kvm` device through to the sandbox to enable hardware
+virtualization inside it (running firecracker microVMs, QEMU with KVM
+acceleration, or rr recording inside guests via the virtual PMU):
+```bash
+./bin/claudebox --kvm
+```
+
+This is opt-in and requires the host to have a working `/dev/kvm` (KVM kernel
+module loaded; on cloud VMs, nested virtualization must be enabled). ClaudeBox
+errors out early if `--kvm` is given but the host has no `/dev/kvm`.
+
 ### Help
 
 ```bash
